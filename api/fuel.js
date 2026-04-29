@@ -1,39 +1,58 @@
-// api/fuel.js
 const axios = require('axios');
 
 export default async function handler(req, res) {
+    // 允许跨域
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    
     const { postcode, fueltype, token } = req.query;
-    const config = { headers: { 'Authorization': `FPDAPI SubscriberToken=${token}` } };
+
+    if (!token || !postcode) {
+        return res.status(400).json({ error: "Missing parameters" });
+    }
+
+    const config = { 
+        headers: { 'Authorization': `FPDAPI SubscriberToken=${token}` },
+        timeout: 8000 // 8秒超时，防止 QLD 接口太慢导致 Vercel 崩溃
+    };
 
     try {
-        // 1. 获取站点详情
-        const sitesRes = await axios.get('https://fppdirectapi-prod.fuelpricesqld.com.au/Subscriber/GetFullSiteDetails?countryId=21&geoRegionLevel=3&geoRegionId=1', config);
-        const mySites = sitesRes.data.filter(s => s.P == postcode).slice(0, 5);
+        // 并行请求两个接口，速度更快
+        const [sitesRes, pricesRes] = await Promise.all([
+            axios.get('https://fppdirectapi-prod.fuelpricesqld.com.au/Subscriber/GetFullSiteDetails?countryId=21&geoRegionLevel=3&geoRegionId=1', config),
+            axios.get('https://fppdirectapi-prod.fuelpricesqld.com.au/Price/GetSitesPrices?countryId=21&geoRegionLevel=3&geoRegionId=1', config)
+        ]);
+
+        // 1. 过滤站点
+        const mySites = sitesRes.data.filter(s => s.P == postcode);
         const siteIds = mySites.map(s => s.S);
 
-        // 2. 获取价格
-        const pricesRes = await axios.get('https://fppdirectapi-prod.fuelpricesqld.com.au/Price/GetSitesPrices?countryId=21&geoRegionLevel=3&geoRegionId=1', config);
-        
-        // 3. 匹配逻辑
-        const fuelIdMap = { "U91": 2, "P95": 5, "P98": 16, "Diesel": 3 };
+        // 2. 匹配油品 ID
+        const fuelIdMap = { "U91": 2, "P95": 5, "P98": 16, "Diesel": 3, "DL": 3 };
         const targetFuelId = fuelIdMap[fueltype] || 2;
 
+        // 3. 组装结果
         const results = [];
-        pricesRes.data.SitePrices.forEach(p => {
+        const allPrices = pricesRes.data.SitePrices || [];
+
+        allPrices.forEach(p => {
             if (p.FuelId == targetFuelId && siteIds.includes(p.SiteId)) {
                 const siteInfo = mySites.find(s => s.S == p.SiteId);
                 results.push({
                     n: siteInfo.N, // Name
                     a: siteInfo.A, // Address
                     p: p.Price / 10, // Price
-                    b: fueltype     // Brand
+                    b: fueltype
                 });
             }
         });
 
-        // 只给 ESP32 返回这几百个字节，内存压力瞬间消失
-        res.status(200).json(results.slice(0, 3));
+        // 按价格从低到高排序，取前3个
+        const finalData = results.sort((a, b) => a.p - b.p).slice(0, 3);
+        
+        res.status(200).json(finalData);
+
     } catch (error) {
-        res.status(500).json({ error: "Cloud Fetch Failed" });
+        console.error(error);
+        res.status(500).json({ error: "Fetch failed", details: error.message });
     }
 }
