@@ -31,16 +31,25 @@ export default async function handler(req, res) {
 
         const siteIds = mySites.map(s => s.S);
 
-        // --- 核心修复：严谨的油品 ID 判定 ---
-        const fuelIdMap = { "U91": 2, "P95": 5, "P98": 16, "Diesel": 3, "DL": 3, "E10": 6 };
+        // --- 核心修复：基于官方 curl 结果的真实映射表 ---
+        // P98 对应 8, E10 对应 12, Diesel 对应 3
+        const fuelIdMap = { 
+            "U91": 2, 
+            "P95": 5, 
+            "P98": 8, 
+            "DIESEL": 3, 
+            "E10": 12, 
+            "PD": 14 
+        };
         
         let targetFuelId;
-        // 如果 fueltype 是纯数字（如 "16"），强制转为数字
+        const upperType = (fueltype || "").toUpperCase();
+
+        // 逻辑判定：优先识别数字 ID，其次识别映射表
         if (/^\d+$/.test(fueltype)) {
             targetFuelId = parseInt(fueltype);
         } else {
-            // 如果是字母（如 "P98"），查找映射，找不到则设为 0（代表非法，不触发默认值）
-            targetFuelId = fuelIdMap[fueltype] || 0; 
+            targetFuelId = fuelIdMap[upperType] || 0; 
         }
 
         // 2. 获取价格
@@ -57,7 +66,7 @@ export default async function handler(req, res) {
                         n: siteInfo.N || "Unknown",
                         a: siteInfo.A || "",
                         p: p.Price / 10,
-                        b: fueltype.toUpperCase() // 统一转大写返回
+                        b: upperType
                     });
                 }
             }
@@ -66,13 +75,14 @@ export default async function handler(req, res) {
         // 3. 排序与返回
         if (results.length === 0) {
             return res.status(200).json([{ 
-                n: `No ${fueltype} Data`, 
-                a: `Site count: ${mySites.length}`, 
+                n: `No ${upperType} Data`, 
+                a: `ID:${targetFuelId} not found in ${postcode}`, 
                 p: 0, 
-                b: fueltype 
+                b: upperType 
             }]);
         }
 
+        // 按价格从低到高排序，取前三名
         const finalData = results.sort((a, b) => a.p - b.p).slice(0, 3);
         res.status(200).json(finalData);
 
