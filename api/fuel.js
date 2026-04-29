@@ -10,53 +10,61 @@ export default async function handler(req, res) {
 
     const config = { 
         headers: { 'Authorization': `FPDAPI SubscriberToken=${token}` },
-        timeout: 10000 
+        timeout: 15000 
     };
 
     try {
-        const [sitesRes, pricesRes] = await Promise.all([
-            axios.get('https://fppdirectapi-prod.fuelpricesqld.com.au/Subscriber/GetFullSiteDetails?countryId=21&geoRegionLevel=3&geoRegionId=1', config),
-            axios.get('https://fppdirectapi-prod.fuelpricesqld.com.au/Price/GetSitesPrices?countryId=21&geoRegionLevel=3&geoRegionId=1', config)
-        ]);
-
-        // --- 修复点：强制确保 sites 是数组 ---
-        const rawSites = Array.isArray(sitesRes.data) ? sitesRes.data : [];
-        const mySites = rawSites.filter(s => s && s.P == postcode);
+        // 1. 获取所有站点
+        const sitesRes = await axios.get('https://fppdirectapi-prod.fuelpricesqld.com.au/Subscriber/GetFullSiteDetails?countryId=21&geoRegionLevel=3&geoRegionId=1', config);
         
+        // 自动识别数据位置：有些 API 版本数据在 .SITES 之下，有些直接是数组
+        const rawSites = sitesRes.data.SITES || (Array.isArray(sitesRes.data) ? sitesRes.data : []);
+        
+        // 2. 增强匹配邮编 (过滤出 4169 的站)
+        const mySites = rawSites.filter(s => {
+            const p = (s.P || s.Postcode || s.p || "").toString();
+            return p === postcode.trim();
+        });
+
+        // 如果没找到站，返回调试信息告知搜到了多少个总站
         if (mySites.length === 0) {
-            return res.status(200).json([]); // 如果没找到邮编对应的点，直接返回空数组
+            return res.status(200).json([{ n: "No sites found in " + postcode, a: "Total sites in QLD: " + rawSites.length, p: 0, b: "" }]);
         }
 
-        const siteIds = mySites.map(s => s.S);
+        const siteIds = mySites.map(s => s.S || s.SiteId || s.id);
 
-        // 油品 ID 转换
+        // 3. 获取价格
+        const pricesRes = await axios.get('https://fppdirectapi-prod.fuelpricesqld.com.au/Price/GetSitesPrices?countryId=21&geoRegionLevel=3&geoRegionId=1', config);
+        
+        // 价格数据通常在 .SitePrices 中
+        const allPrices = pricesRes.data.SitePrices || (Array.isArray(pricesRes.data) ? pricesRes.data : []);
+
         const fuelIdMap = { "U91": 2, "P95": 5, "P98": 16, "Diesel": 3, "DL": 3 };
         const targetFuelId = fuelIdMap[fueltype] || 2;
 
         const results = [];
-        // --- 修复点：确保 pricesRes.data.SitePrices 存在 ---
-        const allPrices = (pricesRes.data && Array.isArray(pricesRes.data.SitePrices)) ? pricesRes.data.SitePrices : [];
-
         allPrices.forEach(p => {
-            if (p.FuelId == targetFuelId && siteIds.includes(p.SiteId)) {
-                const siteInfo = mySites.find(s => s.S == p.SiteId);
+            const pSiteId = p.SiteId || p.S || p.si;
+            const pFuelId = p.FuelId || p.F || p.fi;
+            
+            if (pFuelId == targetFuelId && siteIds.includes(pSiteId)) {
+                const siteInfo = mySites.find(s => (s.S || s.SiteId || s.id) == pSiteId);
                 if (siteInfo) {
                     results.push({
-                        n: siteInfo.N,
-                        a: siteInfo.A,
-                        p: p.Price / 10,
+                        n: siteInfo.N || siteInfo.Name || "Unknown",
+                        a: siteInfo.A || siteInfo.Address || "",
+                        p: (p.Price || p.P || p.pr) / 10,
                         b: fueltype
                     });
                 }
             }
         });
 
-        // 按价格从低到高排序，取前3个
+        // 排序并取前3
         const finalData = results.sort((a, b) => a.p - b.p).slice(0, 3);
         res.status(200).json(finalData);
 
     } catch (error) {
-        console.error("Fetch Error:", error.message);
-        res.status(500).json({ error: "Cloud Fetch Failed", details: error.message });
+        res.status(500).json({ error: "Fetch Error", msg: error.message });
     }
 }
